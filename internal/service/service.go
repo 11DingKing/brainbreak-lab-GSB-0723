@@ -127,13 +127,28 @@ func (s *Service) sealPersonal(subID uuid.UUID, in CreateExperimentInput) ([]byt
 	return s.cipher.SealFor(subID, raw)
 }
 
-// unsealSubject decrypts a subject's personal blob into the transient fields the
-// domain fold needs. Returns ErrDeleted if the key was shredded.
-func (s *Service) unsealSubject(ss store.StoredSubject) (domain.Subject, error) {
+// unsealSubjectTx is the transaction-scoped decrypt path: it fetches the data
+// key on the transaction's own connection (tx.GetDataKey) rather than the pool,
+// so a transaction already holding a subject row lock does not need a second
+// pooled connection — avoiding pool-exhaustion deadlock under concurrent
+// writers. Returns ErrDeleted if the key was shredded.
+func (s *Service) unsealSubjectTx(tx store.Tx, ctx context.Context, ss store.StoredSubject) (domain.Subject, error) {
 	if ss.Auth == store.AuthDeleted || len(ss.SealedPersonal) == 0 {
 		return domain.Subject{}, ErrDeleted
 	}
-	raw, err := s.cipher.OpenFor(ss.ID, ss.SealedPersonal)
+	key, err := tx.GetDataKey(ctx, ss.ID)
+	if err != nil {
+		if errors.Is(err, cryptoshred.ErrKeyDestroyed) {
+			return domain.Subject{}, ErrDeleted
+		}
+		return domain.Subject{}, err
+	}
+	raw, oerr := cryptoshred.Open(key, ss.SealedPersonal, ss.ID)
+	return s.finishUnseal(ss, raw, oerr)
+}
+
+// finishUnseal maps decryption errors and parses the personal payload.
+func (s *Service) finishUnseal(ss store.StoredSubject, raw []byte, err error) (domain.Subject, error) {
 	if err != nil {
 		if errors.Is(err, cryptoshred.ErrKeyDestroyed) {
 			return domain.Subject{}, ErrDeleted

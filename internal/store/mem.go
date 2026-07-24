@@ -93,7 +93,7 @@ func (m *Mem) WithTx(ctx context.Context, fn func(tx Tx) error) (err error) {
 	defer m.mu.Unlock()
 
 	staged := m.data.clone()
-	tx := &memTx{data: staged}
+	tx := &memTx{data: staged, owner: m}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -145,7 +145,8 @@ func (m *Mem) DestroyKey(subjectID uuid.UUID) error {
 
 // memTx implements Tx against a staged memData.
 type memTx struct {
-	data *memData
+	data  *memData
+	owner *Mem
 }
 
 func (t *memTx) UpsertExperiment(ctx context.Context, e Experiment) error {
@@ -210,6 +211,24 @@ func (t *memTx) SetAuth(ctx context.Context, exp, sub uuid.UUID, state AuthState
 	s.Auth = state
 	t.data.subjects[k] = s
 	return nil
+}
+
+func (t *memTx) LockSubjectForUpdate(ctx context.Context, exp, sub uuid.UUID) error {
+	// The in-memory store serialises every WithTx under a single mutex, so there
+	// is no lost-update window to guard against; we only validate existence to
+	// mirror the Postgres implementation's contract.
+	if _, ok := t.data.subjects[subjectKey{exp, sub}]; !ok {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetDataKey reads the key from the owning store's key map. The in-memory key
+// store uses its own lock (keyMu) which the WithTx data lock never overlaps, so
+// there is no pool-exhaustion analogue to worry about here; this exists to
+// satisfy the Tx contract and mirror the Postgres transaction-scoped key read.
+func (t *memTx) GetDataKey(ctx context.Context, sub uuid.UUID) ([]byte, error) {
+	return t.owner.GetKey(sub)
 }
 
 func (t *memTx) InsertEventIfAbsent(ctx context.Context, e domain.Event) (bool, error) {

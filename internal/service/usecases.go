@@ -55,6 +55,11 @@ func (s *Service) WriteEvents(ctx context.Context, in WriteEventsInput) (WriteEv
 
 	var out WriteEventsOutput
 	err := s.store.WithTx(ctx, func(tx store.Tx) error {
+		// Serialise concurrent writers for this subject so that ListEvents below
+		// observes every committed event and results converge (no lost updates).
+		if err := tx.LockSubjectForUpdate(ctx, in.ExperimentID, in.SubjectID); err != nil {
+			return mapStoreErr(err)
+		}
 		ss, err := tx.GetSubject(ctx, in.ExperimentID, in.SubjectID)
 		if err != nil {
 			return mapStoreErr(err)
@@ -65,7 +70,7 @@ func (s *Service) WriteEvents(ctx context.Context, in WriteEventsInput) (WriteEv
 		case store.AuthDeleted:
 			return ErrDeleted
 		}
-		subject, err := s.unsealSubject(ss)
+		subject, err := s.unsealSubjectTx(tx, ctx, ss)
 		if err != nil {
 			return err
 		}
@@ -151,6 +156,11 @@ type RecomputeInput struct {
 func (s *Service) Recompute(ctx context.Context, in RecomputeInput) (WriteEventsOutput, error) {
 	var out WriteEventsOutput
 	err := s.store.WithTx(ctx, func(tx store.Tx) error {
+		// Lock the subject so a concurrent WriteEvents cannot interleave between
+		// our ListEvents and SaveResult and clobber the recomputed result.
+		if err := tx.LockSubjectForUpdate(ctx, in.ExperimentID, in.SubjectID); err != nil {
+			return mapStoreErr(err)
+		}
 		ss, err := tx.GetSubject(ctx, in.ExperimentID, in.SubjectID)
 		if err != nil {
 			return mapStoreErr(err)
@@ -161,7 +171,7 @@ func (s *Service) Recompute(ctx context.Context, in RecomputeInput) (WriteEvents
 		if ss.Auth == store.AuthRevoked {
 			return ErrRevoked
 		}
-		subject, err := s.unsealSubject(ss)
+		subject, err := s.unsealSubjectTx(tx, ctx, ss)
 		if err != nil {
 			return err
 		}

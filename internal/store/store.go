@@ -92,6 +92,26 @@ type Tx interface {
 	GetSubject(ctx context.Context, experimentID, subjectID uuid.UUID) (StoredSubject, error)
 	SetAuth(ctx context.Context, experimentID, subjectID uuid.UUID, state AuthState) error
 
+	// LockSubjectForUpdate acquires a row-level write lock on the subject for the
+	// duration of the transaction, serialising concurrent event-write/recompute
+	// transactions for the same subject. Without this, two transactions writing
+	// DIFFERENT events (distinct idempotency keys, so no row conflict) could each
+	// read the event set without the other's still-uncommitted row and then both
+	// overwrite the derived result — a lost update that drops events from the
+	// replayable result. Callers MUST take this lock before ListEvents+SaveResult
+	// so that recomputation observes every committed event and results converge.
+	// Returns ErrNotFound if the subject does not exist.
+	LockSubjectForUpdate(ctx context.Context, experimentID, subjectID uuid.UUID) error
+
+	// GetDataKey returns the subject's crypto-shred data key using the
+	// transaction's OWN connection. Decrypting personal data from inside a
+	// transaction MUST go through this rather than the pool-level KeyStore:
+	// while a transaction holds a row lock it already occupies a pooled
+	// connection, so acquiring a second connection for the key would deadlock
+	// the pool once concurrency reaches the pool size. Returns the same
+	// cryptoshred sentinel errors (ErrKeyMissing / ErrKeyDestroyed).
+	GetDataKey(ctx context.Context, subjectID uuid.UUID) ([]byte, error)
+
 	// InsertEventIfAbsent stores an event idempotently. It returns inserted=false
 	// when an event with the same idempotency key already exists, guaranteeing an
 	// event is counted at most once regardless of retries or concurrent uploads.

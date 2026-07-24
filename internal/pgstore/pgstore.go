@@ -202,6 +202,44 @@ func (t *pgTx) SetAuth(ctx context.Context, exp, sub uuid.UUID, state store.Auth
 	return nil
 }
 
+func (t *pgTx) LockSubjectForUpdate(ctx context.Context, exp, sub uuid.UUID) error {
+	// SELECT ... FOR UPDATE takes a row-level write lock on the subject held to
+	// the end of the transaction. Concurrent event-write transactions for the
+	// same subject therefore serialise here: the second blocks until the first
+	// commits, then observes the first's now-committed event before it lists +
+	// recomputes. This closes the lost-update window where two writers of
+	// different events would each overwrite the derived result and drop the
+	// other's event.
+	var one int
+	err := t.tx.QueryRow(ctx,
+		`SELECT 1 FROM subjects WHERE experiment_id=$1 AND id=$2 FOR UPDATE`, exp, sub).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	return err
+}
+
+// GetDataKey reads the subject key on the transaction's own connection, so a
+// transaction that already holds a row lock does not need a second pooled
+// connection to decrypt personal data (which would deadlock the pool under
+// concurrency ≥ pool size).
+func (t *pgTx) GetDataKey(ctx context.Context, sub uuid.UUID) ([]byte, error) {
+	var key []byte
+	var destroyed bool
+	err := t.tx.QueryRow(ctx,
+		`SELECT key, destroyed FROM subject_keys WHERE subject_id=$1`, sub).Scan(&key, &destroyed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, cryptoshred.ErrKeyMissing
+	}
+	if err != nil {
+		return nil, err
+	}
+	if destroyed {
+		return nil, cryptoshred.ErrKeyDestroyed
+	}
+	return key, nil
+}
+
 func (t *pgTx) InsertEventIfAbsent(ctx context.Context, e domain.Event) (bool, error) {
 	// Enforce subject lifecycle before ingesting.
 	var auth string

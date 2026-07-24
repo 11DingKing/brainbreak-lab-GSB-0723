@@ -75,7 +75,10 @@ func TestFold_AdultDailyAndSessionLimits(t *testing.T) {
 	require.Equal(t, BandAdult, res.Band)
 	require.Len(t, res.Daily, 1)
 	require.Equal(t, (70 * time.Minute).Milliseconds(), res.Daily[0].EngagedMS)
-	require.Equal(t, (60 * time.Minute).Milliseconds(), res.Daily[0].AllowedMS)
+	// Each session is truncated to the 15m single-session cap before the daily
+	// cap applies: 15m + 15m = 30m allowed (well under the 60m daily cap), so the
+	// session cap — not the daily cap — is what actually bounds allowed usage.
+	require.Equal(t, (30 * time.Minute).Milliseconds(), res.Daily[0].AllowedMS)
 	require.True(t, res.Daily[0].OverDailyLimit)
 
 	var haveDaily, haveSession bool
@@ -134,6 +137,33 @@ func TestFold_ChildSessionLimit(t *testing.T) {
 		}
 	}
 	require.True(t, session)
+	// The session cap must truncate allowed usage, not merely flag it: 12m
+	// engaged, only 10m allowed.
+	require.Len(t, res.Daily, 1)
+	require.Equal(t, (12 * time.Minute).Milliseconds(), res.Daily[0].EngagedMS)
+	require.Equal(t, (10 * time.Minute).Milliseconds(), res.Daily[0].AllowedMS)
+	require.Equal(t, (10 * time.Minute).Milliseconds(), res.TotalAllowedMS)
+}
+
+// TestFold_SessionCapTruncatesEachSessionIndependently verifies the cap resets
+// per session (device change / attention switch), so two capped sessions grant
+// twice the cap in allowed usage.
+func TestFold_SessionCapTruncatesEachSessionIndependently(t *testing.T) {
+	exp, sub := uuid.New(), uuid.New()
+	loc := mustTZ(t, "UTC")
+	// Child: 10m single-session cap, no daily cap.
+	subject := Subject{ID: sub, Birth: time.Date(2018, 1, 1, 0, 0, 0, 0, loc), Timezone: "UTC"}
+	asOf := time.Date(2026, 6, 1, 12, 0, 0, 0, loc)
+	base := time.Date(2026, 6, 1, 9, 0, 0, 0, loc)
+	events := []Event{
+		ev(exp, sub, "A", 1, base, 15*time.Minute), // capped to 10m
+		{ExperimentID: exp, SubjectID: sub, DeviceID: "A", ClientSeq: 2, Type: EventAttentionSwitch, OccurredAt: base.Add(16 * time.Minute)},
+		ev(exp, sub, "A", 3, base.Add(20*time.Minute), 15*time.Minute), // capped to 10m
+	}
+	res := Fold(subject, events, FoldConfig{AsOf: asOf})
+	require.Len(t, res.Daily, 1)
+	require.Equal(t, (30 * time.Minute).Milliseconds(), res.Daily[0].EngagedMS)
+	require.Equal(t, (20 * time.Minute).Milliseconds(), res.Daily[0].AllowedMS)
 }
 
 func TestFold_TimezoneCrossDaySplitsUsage(t *testing.T) {
@@ -150,4 +180,46 @@ func TestFold_TimezoneCrossDaySplitsUsage(t *testing.T) {
 	require.Len(t, res.Daily, 2)
 	require.Equal(t, "2026-06-01", res.Daily[0].Day)
 	require.Equal(t, "2026-06-02", res.Daily[1].Day)
+}
+
+// TestFold_SingleEventSpanningMidnightIsSplit verifies a single engagement that
+// crosses local midnight has its duration divided between the two days rather
+// than attributed wholly to the start day.
+func TestFold_SingleEventSpanningMidnightIsSplit(t *testing.T) {
+	exp, sub := uuid.New(), uuid.New()
+	loc := mustTZ(t, "Asia/Shanghai")
+	subject := Subject{ID: sub, Birth: time.Date(1990, 1, 1, 0, 0, 0, 0, loc), Timezone: "Asia/Shanghai"}
+	asOf := time.Date(2026, 6, 2, 12, 0, 0, 0, loc)
+
+	// Starts 23:50 local June 1, lasts 20m → 10m on June 1, 10m on June 2.
+	e := ev(exp, sub, "A", 1, time.Date(2026, 6, 1, 23, 50, 0, 0, loc), 20*time.Minute)
+	res := Fold(subject, []Event{e}, FoldConfig{AsOf: asOf})
+	require.Len(t, res.Daily, 2)
+	require.Equal(t, "2026-06-01", res.Daily[0].Day)
+	require.Equal(t, (10 * time.Minute).Milliseconds(), res.Daily[0].EngagedMS)
+	require.Equal(t, "2026-06-02", res.Daily[1].Day)
+	require.Equal(t, (10 * time.Minute).Milliseconds(), res.Daily[1].EngagedMS)
+	// Total engaged is conserved by the split.
+	require.Equal(t, (20 * time.Minute).Milliseconds(), res.TotalEngagedMS)
+}
+
+// TestSplitByLocalDay_Unit exercises the helper directly, including a multi-day
+// span and DST correctness (spring-forward day in America/New_York).
+func TestSplitByLocalDay_Unit(t *testing.T) {
+	sh := mustTZ(t, "Asia/Shanghai")
+	slices := splitByLocalDay(time.Date(2026, 6, 1, 23, 30, 0, 0, sh), 90*time.Minute, sh)
+	require.Len(t, slices, 2)
+	require.Equal(t, "2026-06-01", slices[0].day)
+	require.Equal(t, 30*time.Minute, slices[0].dur)
+	require.Equal(t, "2026-06-02", slices[1].day)
+	require.Equal(t, 60*time.Minute, slices[1].dur)
+
+	// Conservation: slices always sum to the original duration.
+	total := time.Duration(0)
+	multi := splitByLocalDay(time.Date(2026, 6, 1, 12, 0, 0, 0, sh), 50*time.Hour, sh)
+	require.GreaterOrEqual(t, len(multi), 3)
+	for _, s := range multi {
+		total += s.dur
+	}
+	require.Equal(t, 50*time.Hour, total)
 }
