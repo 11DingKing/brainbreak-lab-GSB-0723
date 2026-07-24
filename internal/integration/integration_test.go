@@ -26,16 +26,17 @@ import (
 )
 
 func testDSN() string {
-	if v := os.Getenv("DATABASE_URL"); v != "" {
-		return v
-	}
-	return "postgres://postgres:postgres@localhost:5433/focus?sslmode=disable"
+	return os.Getenv("DATABASE_URL")
 }
 
 func openTestDB(t *testing.T) *store.DB {
 	t.Helper()
+	dsn := testDSN()
+	if dsn == "" {
+		t.Fatal("DATABASE_URL not set; TestMain should have provisioned PostgreSQL")
+	}
 	ctx := context.Background()
-	cfg, err := pgxpool.ParseConfig(testDSN())
+	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatalf("parse dsn: %v", err)
 	}
@@ -48,11 +49,11 @@ func openTestDB(t *testing.T) *store.DB {
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
-		t.Skipf("cannot open db: %v", err)
+		t.Fatalf("cannot open db: %v", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		t.Skipf("cannot ping db: %v", err)
+		t.Fatalf("cannot ping db: %v", err)
 	}
 	db := store.New(pool)
 	if err := db.Migrate(ctx); err != nil {
