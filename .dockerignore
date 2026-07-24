@@ -1,0 +1,16 @@
+.git
+.gitignore
+*.md
+vendor/
+*.test
+*.out
+tmp/
+dist/
+build/
+coverage/
+.venv/
+__pycache__/
+node_modules/
+.dockerignore
+Dockerfile
+docker-compose.yml
