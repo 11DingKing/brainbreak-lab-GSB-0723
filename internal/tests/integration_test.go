@@ -57,9 +57,11 @@ func findMigrationsDir(t *testing.T) string {
 	dir, err := os.Getwd()
 	require.NoError(t, err)
 	for {
-		candidate := filepath.Join(dir, "migrations")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
+		for _, sub := range []string{"migrations", filepath.Join("internal", "migrations")} {
+			candidate := filepath.Join(dir, sub)
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				return candidate
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

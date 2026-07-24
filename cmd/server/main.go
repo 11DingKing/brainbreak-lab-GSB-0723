@@ -12,10 +12,29 @@ import (
 
 	"brainbreak-lab/internal/config"
 	"brainbreak-lab/internal/handler"
+	bmigrations "brainbreak-lab/internal/migrations"
 	"brainbreak-lab/internal/store"
 
 	"github.com/gin-gonic/gin"
 )
+
+func resolveMigrationsDir() string {
+	if dir := os.Getenv("MIGRATIONS_DIR"); dir != "" {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(exe), "migrations")
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	if info, err := os.Stat("migrations"); err == nil && info.IsDir() {
+		return "migrations"
+	}
+	return ""
+}
 
 func main() {
 	cfg := config.Load()
@@ -26,21 +45,22 @@ func main() {
 	}
 	defer db.Close()
 
-	migrationsDir := os.Getenv("MIGRATIONS_DIR")
-	if migrationsDir == "" {
-		exe, err := os.Executable()
-		if err == nil {
-			migrationsDir = filepath.Join(filepath.Dir(exe), "migrations")
-		}
-	}
-	_ = migrationsDir
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := store.RunMigrations(ctx, db, "migrations"); err != nil {
-		log.Printf("Warning: migrations from ./migrations failed: %v, trying embedded path", err)
+	migrationsDir := resolveMigrationsDir()
+	if migrationsDir != "" {
+		log.Printf("running migrations from directory: %s", migrationsDir)
+		if err := store.RunMigrations(ctx, db, migrationsDir); err != nil {
+			log.Fatalf("migration failed, aborting startup: %v", err)
+		}
+	} else {
+		log.Println("running embedded migrations")
+		if err := store.RunEmbeddedMigrations(ctx, db, bmigrations.FS); err != nil {
+			log.Fatalf("embedded migration failed, aborting startup: %v", err)
+		}
 	}
+	log.Println("migrations applied successfully")
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
